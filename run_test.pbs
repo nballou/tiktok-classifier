@@ -1,0 +1,94 @@
+#!/bin/bash
+# Small test job — run this before run_classify.pbs to verify the pipeline.
+# Uses the first 20 rows of sample_1000.parquet.
+#
+# Submit:
+#   qsub run_test.pbs
+#   qstat -u $USER
+#
+# Check output:
+#   cat logs/tiktok_test.o*    # stdout (classification results)
+#   cat logs/tiktok_test.e*    # stderr (errors)
+#   cat logs/vllm_test.log     # vLLM server log
+#   python -c "import pandas as pd; df = pd.read_parquet('test_20.parquet'); print(df[['url','is_mental_health_broad','is_mental_health','is_mental_health_rationale']].to_string())"
+
+#PBS -N tiktok_test
+#PBS -l walltime=00:30:00
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_type=L40S
+#PBS -q gpu72
+#PBS -o logs/
+#PBS -e logs/
+
+MODEL="google/gemma-3-4b-it"
+
+module load miniforge/3
+eval "$(~/miniforge3/bin/conda shell.bash hook)"
+conda activate tiktok
+
+export HF_HOME=$EPHEMERAL/huggingface
+cd $PBS_O_WORKDIR
+mkdir -p logs
+
+echo "=== Test job started: $(date) ==="
+echo "Node: $(hostname)"
+echo "GPU:  $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"
+echo ""
+
+# Create test_20.parquet from sample_1000.parquet if it doesn't exist
+python -c "
+import pandas as pd, os
+if not os.path.exists('test_20.parquet'):
+    df = pd.read_parquet('sample_1000.parquet').head(20)
+    df.to_parquet('test_20.parquet', index=False)
+    print('Created test_20.parquet (20 rows)')
+else:
+    print('test_20.parquet already exists')
+"
+
+# Start vLLM
+vllm serve "$MODEL" \
+    --port 8000 \
+    --max-model-len 4096 \
+    --gpu-memory-utilization 0.90 \
+    --disable-log-requests \
+    > logs/vllm_test.log 2>&1 &
+VLLM_PID=$!
+
+echo "Waiting for vLLM..."
+WAIT=0
+until curl -sf http://localhost:8000/health > /dev/null 2>&1; do
+    sleep 10; WAIT=$((WAIT+10))
+    if [ $WAIT -ge 300 ]; then
+        echo "ERROR: vLLM failed to start. See logs/vllm_test.log"
+        kill $VLLM_PID 2>/dev/null; exit 1
+    fi
+done
+echo "vLLM ready after ${WAIT}s."
+
+# Screen pass
+echo ""
+echo "=== Screen pass ==="
+python 02_classify.py test_20.parquet \
+    --stage screen --backend vllm --model "$MODEL" --concurrency 4 -v
+
+# Classify pass
+echo ""
+echo "=== Classify pass ==="
+python 02_classify.py test_20.parquet \
+    --stage classify \
+    --filter is_mental_health_broad=TRUE \
+    --rationale \
+    --backend vllm --model "$MODEL" --concurrency 2 -v
+
+# Summary
+echo ""
+python -c "
+import pandas as pd
+df = pd.read_parquet('test_20.parquet')
+print('Results:')
+print(df[['url','is_mental_health_broad','is_mental_health','is_mental_health_rationale']].to_string())
+"
+
+kill $VLLM_PID 2>/dev/null
+echo ""
+echo "=== Test job finished: $(date) ==="

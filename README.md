@@ -1,18 +1,25 @@
 # TikTok Mental Health Classifier
 
-Classifies TikTok videos as mental-health-related or not, based on their text
-metadata (description, transcript, suggested words). Each video is labelled
-**TRUE** (meaningfully engages with mental health experience) or **FALSE**
-(does not) by a large language model running locally via
-[vLLM](https://docs.vllm.ai/).
+Two-pass LLM pipeline that classifies TikTok videos as mental-health-related
+based on text metadata (description, transcript, suggested words).
 
-The classifier uses guided decoding to constrain the model's output to the
-allowed labels, and supports resume, batched checkpointing, and HPC
-array-job parallelism.
+- **Pass 1 — screen** (`--stage screen`): liberal first pass over all videos.
+  Casts a wide net; false positives are acceptable. Writes to
+  `is_mental_health_broad`.
+- **Pass 2 — classify** (`--stage classify`): fine-grained second pass over
+  screen-passing rows only. Requires genuine engagement with a recognised
+  mental health condition. Writes to `is_mental_health`.
+
+Supports two backends:
+- **Ollama** — local development on Mac
+- **vLLM** — HPC with guided decoding
+
+Both stages support resume (already-classified rows are skipped), atomic
+checkpointing, and HPC array-job parallelism.
 
 ## Setup
 
-Requires Python 3.14+ and [uv](https://docs.astral.sh/uv/).
+Requires Python 3.11+ and [uv](https://docs.astral.sh/uv/).
 
 ```bash
 uv sync
@@ -20,128 +27,186 @@ uv sync
 
 ## Running the LLM server
 
-Start a [vLLM](https://docs.vllm.ai/) server with an instruct-tuned model
-before classifying. The model must support chat completions and guided
-decoding.
+### Local (Ollama)
 
 ```bash
-vllm serve <model-name>
-
-# On Mac (vllm-metal), enable paged attention for better memory efficiency:
-VLLM_METAL_USE_PAGED_ATTENTION=1 vllm serve <model-name>
+ollama pull gemma4:e4b    # or another instruct model
+ollama serve              # starts automatically on Mac after install
 ```
 
-The classifier connects to `http://localhost:8000/v1` by default (override
-with `--endpoint`). Pass `--model` to match whatever model the server is
-running.
-
-> **Current local testing setup (Mac, vllm-metal):**
-> ```bash
-> VLLM_METAL_USE_PAGED_ATTENTION=1 vllm serve Qwen/Qwen3-8B
-> ```
-> Qwen3.5 would be preferable but requires a linear attention kernel that
-> vllm-metal doesn't support yet
-> ([tracking issue](https://github.com/vllm-project/vllm-metal/issues/194)).
-> Qwen3-8B is the closest supported alternative.
-
-## Usage
-
-### Stage 1: Mental health classification
-
-The default mode classifies each video as mental-health-related or not,
-writing results to the `is_mental_health` column:
+### HPC (vLLM)
 
 ```bash
-uv run python classify.py <file>.parquet --model <model-name>
+vllm serve google/gemma-3-4b-it   # or Qwen/Qwen3-8B, meta-llama/..., etc.
 ```
 
-Results are written back to the same parquet file. Rows that already have a
-classification are skipped, so you can safely interrupt and resume. Rows with
-`scrape_status='error'` (no metadata available) are automatically skipped.
+The vLLM backend uses guided decoding to constrain output to TRUE/FALSE.
+When `--rationale` is used, guided decoding is disabled and the model is
+prompted for a two-line response (label on line 1, explanation on line 2).
 
-Add `-v` / `--verbose` to print each row's label and URL as it is classified.
-
-### Stage 2: Subclassification
-
-After stage 1, mental-health-related videos can be further classified using a
-custom prompt and label set. For example, to categorise videos as self-help
-vs commiseration:
+## Full pipeline
 
 ```bash
-uv run python classify.py <file>.parquet \
-  --prompt prompts/mh_subtype.txt \
-  --labels SELF_HELP COMMISERATION OTHER \
-  --output-col mh_subtype \
-  --filter is_mental_health=TRUE \
-  --model <model-name>
+# Pass 1: screen all videos (~8% expected to pass)
+python 02_classify.py tiktok_metadata.parquet \
+  --stage screen \
+  --model gemma4:e4b \
+  --concurrency 4 \
+  -v
+
+# Pass 2: classify screen-positives only
+python 02_classify.py tiktok_metadata.parquet \
+  --stage classify \
+  --filter is_mental_health_broad=TRUE \
+  --model gemma4:e4b \
+  --concurrency 4 \
+  -v
 ```
 
-This only processes rows already labelled TRUE in stage 1, and writes results
-to a new `mh_subtype` column. The same resume, checkpointing, and HPC
-features apply.
+Results are written back to the same parquet. Safe to interrupt and resume.
+Rows with `scrape_status='error'` are automatically skipped.
 
-The `--labels`, `--output-col`, and `--filter` flags are general-purpose, so
-additional classification stages can be added in the same way with different
-prompts and label sets.
+## Evaluation
 
-### Extract and classify a test set
+The ground-truth CSV (`handcoded_examples.csv`) contains hand-labelled videos
+with these columns beyond the standard metadata:
 
-Extract specific videos by URL for validation against ground-truth labels, or
-pull a random sample for spot-checks:
+| Column | Description |
+|--------|-------------|
+| `is_mental_health_handcoded` | Ground truth for classify stage (`TRUE`/`FALSE`) |
+| `is_superficial_mental_health_handcoded` | Ground truth for screen stage |
+| `use` | `train` (few-shot example) or `test` (evaluation) |
+| `rationale` | Optional explanation, included in few-shot prompts for classify stage |
 
 ```bash
-# Extract by URL (one per line in a text file)
-uv run python classify.py <file>.parquet --urls <urls-file>.txt -o <output>.parquet
-
-# Or extract a random sample
-uv run python classify.py <file>.parquet --sample <N>
-
-# Then classify
-uv run python classify.py <output>.parquet -v --model <model-name>
+# Evaluate classify stage (filter to screen-passing rows)
+python 02_classify.py tiktok_metadata.parquet \
+  --stage classify \
+  --evaluate handcoded_examples.csv \
+  --filter is_superficial_mental_health_handcoded=TRUE \
+  --rationale \
+  --model gemma4:e4b \
+  --concurrency 2 \
+  -v
 ```
 
-> **Current local testing commands:**
-> ```bash
-> uv run python classify.py tiktok_metadata.parquet --urls ground_truth_urls.txt -o test_set.parquet
-> uv run python classify.py test_set.parquet -v --model Qwen/Qwen3-8B
-> ```
+Evaluation prints accuracy, a confusion matrix, and mismatches with rationales.
+Full results (URL, prediction, ground truth, rationale) are saved to
+`eval_results_{stage}.csv` for inspection.
 
-### HPC parallel workflow
+Experiment results are appended to `experiment_log.csv` after each eval run.
 
-Split the data into chunks, run one job per chunk, then merge:
+### --rationale flag
+
+Requests a one-sentence explanation alongside each label. Stored in
+`{output_col}_rationale` in the parquet. Useful for debugging and spot-checks;
+disables guided decoding on vLLM.
 
 ```bash
-# 1. Partition
-uv run python classify.py <file>.parquet --partition <N>
-
-# 2. Classify each chunk (e.g. in a PBS array job)
-uv run python classify.py chunks/chunk_000.parquet --model <model-name>
-
-# 3. Merge results
-uv run python classify.py chunks/ --merge -o classified.parquet
+python 02_classify.py sample.parquet \
+  --stage classify \
+  --filter is_mental_health_broad=TRUE \
+  --rationale \
+  --model gemma4:e4b \
+  -v
 ```
 
-## Options
+## HPC workflow (Imperial CX3, PBS)
+
+The cluster uses PBS with GPU nodes (`gpu72` queue). The workflow runs vLLM
+as a background process alongside the classifier in a single job.
+
+### One-time setup (run on login node)
+
+```bash
+scp -r tiktok-classifier/ your_username@login.cx3.hpc.ic.ac.uk:~/
+ssh your_username@login.cx3.hpc.ic.ac.uk
+cd ~/tiktok-classifier
+bash setup_hpc_env.sh   # creates conda env + pre-downloads model weights
+```
+
+The setup script installs vLLM and classifier dependencies into a `tiktok`
+conda environment and caches model weights to `$EPHEMERAL/huggingface`
+(10 TB, avoids filling `$HOME`).
+
+### Submit a job
+
+Edit the `MODEL` and `INPUT` variables at the top of `run_classify.pbs`,
+then:
+
+```bash
+mkdir -p ~/tiktok-classifier/logs
+qsub run_classify.pbs
+qstat -u $USER   # monitor status
+```
+
+The job starts a vLLM server, waits for it to be ready, runs the screen pass,
+then the classify pass with `--rationale`. Results and rationales are written
+back to the input parquet. Server logs go to `logs/vllm.log`.
+
+### Full dataset with array jobs
+
+For 1M rows, partition first and run a screen pass per chunk:
+
+```bash
+# 1. Partition into chunks
+python 01_partition.py tiktok_metadata.parquet --partition 100
+
+# 2. One PBS job per chunk — set #PBS -J 1-100 in the job script, then:
+python 02_classify.py chunks/chunk_$(printf "%03d" $((PBS_ARRAY_INDEX-1))).parquet \
+  --stage screen --backend vllm --concurrency 16
+
+# 3. Merge
+python 03_merge.py chunks/ -o screened.parquet
+
+# 4. Classify (single job; screen reduces volume ~10x)
+python 02_classify.py screened.parquet \
+  --stage classify --filter is_mental_health_broad=TRUE \
+  --rationale --backend vllm --concurrency 8
+```
+
+## CLI reference
+
+### 02_classify.py
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--stage` | required | `screen` or `classify` |
+| `--backend` | `ollama` | `ollama` or `vllm` |
+| `--model` | backend-specific | Model name |
+| `--endpoint` | backend-specific | Server URL |
+| `--evaluate CSV` | — | Evaluate against ground-truth CSV; reports accuracy + confusion matrix |
+| `--filter COL=VAL` | — | Only classify rows where column matches value |
+| `--rationale` | off | Request one-sentence explanation alongside each label |
+| `--examples CSV` | — | Inject `use=train` rows as few-shot examples |
+| `--concurrency N` | `4` | Parallel requests |
+| `--batch_size N` | `200` | Rows per checkpoint |
+| `--timeout N` | `120` | Request timeout in seconds (increase for large models) |
+| `--output-col NAME` | stage-specific | Override output column name |
+| `--cols COL ...` | `description transcript suggested_words` | Metadata fields to include |
+| `-v` | off | Verbose: print each result as it arrives |
+
+### 01_partition.py
 
 | Flag | Description |
 |------|-------------|
-| `--model MODEL` | HuggingFace model ID (must match the model the vLLM server is running) |
-| `--endpoint URL` | vLLM server URL (default: `http://localhost:8000/v1`) |
-| `--labels LABEL ...` | Allowed output labels for guided decoding (default: `TRUE FALSE`) |
-| `--output-col NAME` | Column to write results to (default: `is_mental_health`) |
-| `--filter COL=VAL` | Only classify rows where an existing column matches a value |
-| `--concurrency N` | Parallel requests to the server (default: 4) |
-| `--batch_size N` | Rows per checkpoint batch (default: 200) |
-| `--cols COL ...` | Metadata columns to include in the prompt (default: `description transcript suggested_words`) |
-| `--prompt FILE` | Path to a custom prompt template (must contain `{text}`) |
-| `-o, --output PATH` | Output path for `--merge`, `--sample`, or `--urls` |
-| `-v, --verbose` | Print each classification result with URL |
+| `--partition N` | Split into N equal chunks (for array jobs) |
+| `--sample N` | Extract N random rows |
+| `--urls FILE` | Extract rows matching URLs in FILE (one per line) |
+| `-o PATH` | Output path |
+
+### 03_merge.py
+
+| Flag | Description |
+|------|-------------|
+| `-o PATH` | Output parquet path (default: `classified.parquet`) |
 
 ## Output columns
 
-The classifier adds columns to the parquet file depending on the stage:
-
-- **is_mental_health** (stage 1): `TRUE`, `FALSE`, `SKIPPED`, or `UNKNOWN`
-- **mh_subtype** (stage 2, example): whichever labels are specified via `--labels`
-- **prob_true**: Probability of `TRUE` from logprobs (currently `NA` due to a
-  vLLM compatibility issue; the column is reserved for when this is resolved)
+| Column | Stage | Values |
+|--------|-------|--------|
+| `is_mental_health_broad` | screen | `TRUE`, `FALSE`, `SKIPPED`, `UNKNOWN` |
+| `is_mental_health` | classify | `TRUE`, `FALSE`, `SKIPPED`, `UNKNOWN` |
+| `is_mental_health_broad_rationale` | screen + `--rationale` | one-sentence explanation |
+| `is_mental_health_rationale` | classify + `--rationale` | one-sentence explanation |
+| `prob_true` | both | reserved; currently `NA` |
