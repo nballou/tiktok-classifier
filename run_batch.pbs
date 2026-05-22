@@ -1,0 +1,135 @@
+#!/bin/bash
+# Batch classification — screen + classify passes over a set of chunks.
+# A single vLLM instance is shared; resume is automatic (02_classify.py
+# skips rows that already have a non-null output column).
+#
+# Submit:
+#   qsub run_batch.pbs                         # all pending chunks
+#   qsub -v CHUNKS="0-9" run_batch.pbs         # chunks 0–9 (inclusive)
+#   qsub -v CHUNKS="5 7 11" run_batch.pbs      # specific chunks
+#   qsub -v N=10 run_batch.pbs                 # next 10 pending chunks
+#   qsub -v CHUNKS="0-19",N=5 run_batch.pbs    # first 5 pending in 0–19
+#
+# Check status first:
+#   python check_chunks.py
+
+#PBS -N tiktok_batch
+#PBS -l walltime=08:00:00
+#PBS -l select=1:ncpus=8:mem=48gb:ngpus=1
+#PBS -q v1_gpu72
+#PBS -o logs/
+#PBS -e logs/
+
+module load miniforge/3
+eval "$(~/miniforge3/bin/conda shell.bash hook)"
+conda activate tiktok
+
+export HF_HOME=$EPHEMERAL/huggingface
+cd $PBS_O_WORKDIR
+mkdir -p logs
+
+. ./config.sh   # MODEL, VLLM_PORT, vllm_start(), vllm_wait()
+
+echo "=== Batch job started: $(date) ==="
+echo "Node: $(hostname)"
+echo "GPU:  $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Resolve which chunks need work
+# CHUNKS env var: "0-9" (range) or "5 7 11" (space-separated indices)
+# N env var: cap at first N pending chunks
+# ---------------------------------------------------------------------------
+CHUNK_FILES=$(python3 - <<'PYEOF'
+import os, re, glob
+import pandas as pd
+
+CHUNKS_DIR = "chunks"
+spec    = os.environ.get("CHUNKS", "").strip()
+n_limit = int(os.environ.get("N", "0")) or None
+
+all_chunks = sorted(glob.glob(f"{CHUNKS_DIR}/chunk_*.parquet"))
+
+if spec:
+    if re.match(r'^\d+-\d+$', spec):
+        lo, hi = map(int, spec.split('-'))
+        selected = [f"{CHUNKS_DIR}/chunk_{i:03d}.parquet" for i in range(lo, hi + 1)]
+    else:
+        selected = [f"{CHUNKS_DIR}/chunk_{int(i):03d}.parquet" for i in spec.split()]
+    selected = [c for c in selected if os.path.exists(c)]
+else:
+    selected = all_chunks
+
+pending = []
+for path in selected:
+    try:
+        df = pd.read_parquet(path)
+        has_broad      = "is_mental_health_broad" in df.columns
+        has_mh         = "is_mental_health" in df.columns
+        needs_screen   = (not has_broad) or df["is_mental_health_broad"].isna().any()
+        needs_classify = (
+            has_broad and has_mh and
+            ((df["is_mental_health_broad"] == "TRUE") & df["is_mental_health"].isna()).any()
+        )
+        if needs_screen or needs_classify:
+            pending.append(path)
+    except Exception:
+        pending.append(path)   # include unreadable chunks
+    if n_limit and len(pending) >= n_limit:
+        break
+
+print("\n".join(pending))
+PYEOF
+)
+
+if [ -z "$CHUNK_FILES" ]; then
+    echo "No pending chunks found — all done!"
+    exit 0
+fi
+
+mapfile -t CHUNK_ARRAY <<< "$CHUNK_FILES"
+N_TOTAL=${#CHUNK_ARRAY[@]}
+
+echo "Processing $N_TOTAL chunk(s):"
+printf '  %s\n' "${CHUNK_ARRAY[@]}"
+echo ""
+
+# ---------------------------------------------------------------------------
+# Start vLLM
+# ---------------------------------------------------------------------------
+module load CUDA/12.8.0
+# export VLLM_LOGGING_LEVEL=DEBUG
+export CUDA_VISIBLE_DEVICES=0
+
+vllm_start logs/vllm_batch.log logs/vllm_batch.err
+VLLM_PID=$!
+
+if ! vllm_wait; then
+    kill $VLLM_PID 2>/dev/null; exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Classify each chunk (screen → classify)
+# ---------------------------------------------------------------------------
+for i in "${!CHUNK_ARRAY[@]}"; do
+    CHUNK="${CHUNK_ARRAY[$i]}"
+    NUM=$((i + 1))
+    BASE=$(basename "$CHUNK")
+
+    echo ""
+    echo "=== [$NUM/$N_TOTAL] $BASE: screen ($(date)) ==="
+    python 02_classify.py "$CHUNK" \
+        --stage screen --backend vllm --model "$MODEL" --concurrency 16
+
+    echo ""
+    echo "=== [$NUM/$N_TOTAL] $BASE: classify ($(date)) ==="
+    python 02_classify.py "$CHUNK" \
+        --stage classify --filter is_mental_health_broad=TRUE \
+        --backend vllm --model "$MODEL" --concurrency 8 -v
+
+   echo "$(date '+%Y-%m-%d %H:%M:%S') [$NUM/$N_TOTAL] $BASE done" | tee -a logs/batch_progress.log    
+done
+
+kill $VLLM_PID 2>/dev/null
+echo ""
+echo "=== Batch job finished: $(date) ==="

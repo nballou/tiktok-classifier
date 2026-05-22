@@ -12,8 +12,7 @@
 #PBS -o logs/
 #PBS -e logs/
 
-MODEL="google/gemma-4-26B-A4B-it"   # Must match the MODEL variable in run_*.pbs
-INPUT="sample_1000.parquet"
+INPUT="metadata/sample_1000.parquet"
 
 module load miniforge/3
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
@@ -23,33 +22,24 @@ export HF_HOME=$EPHEMERAL/huggingface
 cd $PBS_O_WORKDIR
 mkdir -p logs
 
+. ./config.sh   # MODEL, VLLM_PORT, vllm_start(), vllm_wait()
+
 echo "=== Job started: $(date) ==="
 echo "Node:  $(hostname)"
 echo "GPU:   $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"
 echo "Input: $INPUT"
 echo ""
 
+module load CUDA/12.8.0
+# export VLLM_LOGGING_LEVEL=DEBUG
 export CUDA_VISIBLE_DEVICES=0
 
-vllm serve "$MODEL" \
-    --port 8000 \
-    --max-model-len 4096 \
-    --max-num-batched-tokens 4096 \
-    --quantization fp8 \
-    --gpu-memory-utilization 0.90 \
-    > logs/vllm_test.log 2> logs/vllm_test.err &
+vllm_start logs/vllm.log logs/vllm.err
 VLLM_PID=$!
 
-echo "Waiting for vLLM..."
-WAIT=0
-until curl -sf http://localhost:8000/health > /dev/null 2>&1; do
-    sleep 10; WAIT=$((WAIT+10))
-    if [ $WAIT -ge 300 ]; then
-        echo "ERROR: vLLM failed to start. See logs/vllm.log"
-        kill $VLLM_PID 2>/dev/null; exit 1
-    fi
-done
-echo "vLLM ready after ${WAIT}s."
+if ! vllm_wait; then
+    kill $VLLM_PID 2>/dev/null; exit 1
+fi
 
 echo ""
 echo "=== Pass 1: screen ($(date)) ==="
@@ -61,7 +51,6 @@ echo "=== Pass 2: classify ($(date)) ==="
 python 02_classify.py "$INPUT" \
     --stage classify \
     --filter is_mental_health_broad=TRUE \
-    --rationale \
     --backend vllm --model "$MODEL" --concurrency 8 -v
 
 kill $VLLM_PID 2>/dev/null

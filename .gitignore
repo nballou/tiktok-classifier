@@ -19,3 +19,5 @@ test.txt
 
 # OS files
 .DS_Store
+
+logs/
