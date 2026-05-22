@@ -14,12 +14,12 @@
 
 #PBS -N tiktok_test
 #PBS -l walltime=00:30:00
-#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1:gpu_type=L40S
-#PBS -q gpu72
+#PBS -l select=1:ncpus=4:mem=24gb:ngpus=1
+#PBS -q v1_gpu72
 #PBS -o logs/
 #PBS -e logs/
 
-MODEL="google/gemma-3-4b-it"
+MODEL="google/gemma-4-26B-A4B-it"   # Must match the MODEL variable in run_*.pbs
 
 module load miniforge/3
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
@@ -45,20 +45,25 @@ else:
     print('test_20.parquet already exists')
 "
 
+export VLLM_LOGGING_LEVEL=DEBUG
+export CUDA_VISIBLE_DEVICES=0
+
 # Start vLLM
 vllm serve "$MODEL" \
     --port 8000 \
     --max-model-len 4096 \
+    --max-num-batched-tokens 4096 \
+    --quantization fp8 \
     --gpu-memory-utilization 0.90 \
-    --disable-log-requests \
-    > logs/vllm_test.log 2>&1 &
+    --limit-mm-per-prompt '{"image": 0, "audio": 0}' \
+    > logs/vllm_test.log 2> logs/vllm_test.err &
 VLLM_PID=$!
 
 echo "Waiting for vLLM..."
 WAIT=0
 until curl -sf http://localhost:8000/health > /dev/null 2>&1; do
     sleep 10; WAIT=$((WAIT+10))
-    if [ $WAIT -ge 300 ]; then
+    if [ $WAIT -ge 900 ]; then
         echo "ERROR: vLLM failed to start. See logs/vllm_test.log"
         kill $VLLM_PID 2>/dev/null; exit 1
     fi

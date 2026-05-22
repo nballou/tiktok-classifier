@@ -16,7 +16,7 @@
 
 set -e
 
-MODEL="google/gemma-3-4b-it"   # Must match the MODEL variable in run_*.pbs
+MODEL="google/gemma-4-26B-A4B-it"   # Must match the MODEL variable in run_*.pbs
 
 # ---------------------------------------------------------------------------
 # 1. Conda environment
