@@ -4,7 +4,8 @@
 #   cd "$PBS_O_WORKDIR"
 #   . ./config.sh
 
-MODEL="google/gemma-4-26B-A4B-it"
+MODEL="Qwen/Qwen3.6-35B-A3B"
+MODEL_LABEL="qwen36_35b"   # appended to output columns: is_mental_health_qwen36_35b
 VLLM_PORT=8000
 
 # Start vLLM in the background.
@@ -19,6 +20,7 @@ vllm_start() {
         --quantization fp8 \
         --gpu-memory-utilization 0.90 \
         --limit-mm-per-prompt '{"image": 0, "audio": 0}' \
+        --override-generation-config '{"enable_thinking": false}' \
         > "$log" 2> "$err" &
 }
 

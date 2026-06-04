@@ -14,7 +14,7 @@
 #   python check_chunks.py
 
 #PBS -N tiktok_batch
-#PBS -l walltime=08:00:00
+#PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=8:mem=48gb:ngpus=1
 #PBS -q v1_gpu72
 #PBS -o logs/
@@ -24,7 +24,7 @@ module load miniforge/3
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
 conda activate tiktok
 
-export HF_HOME=$EPHEMERAL/huggingface
+export HF_HOME=$HOME/huggingface
 cd $PBS_O_WORKDIR
 mkdir -p logs
 
@@ -40,13 +40,17 @@ echo ""
 # CHUNKS env var: "0-9" (range) or "5 7 11" (space-separated indices)
 # N env var: cap at first N pending chunks
 # ---------------------------------------------------------------------------
-CHUNK_FILES=$(python3 - <<'PYEOF'
+export MODEL_LABEL  # make available to the heredoc Python
+CHUNK_FILES=$(python3 - <<PYEOF
 import os, re, glob
 import pandas as pd
 
 CHUNKS_DIR = "chunks"
-spec    = os.environ.get("CHUNKS", "").strip()
-n_limit = int(os.environ.get("N", "0")) or None
+spec       = os.environ.get("CHUNKS", "").strip()
+n_limit    = int(os.environ.get("N", "0")) or None
+label      = os.environ.get("MODEL_LABEL", "")
+broad_col  = f"is_mental_health_broad_{label}" if label else "is_mental_health_broad"
+mh_col     = f"is_mental_health_{label}"        if label else "is_mental_health"
 
 all_chunks = sorted(glob.glob(f"{CHUNKS_DIR}/chunk_*.parquet"))
 
@@ -64,12 +68,12 @@ pending = []
 for path in selected:
     try:
         df = pd.read_parquet(path)
-        has_broad      = "is_mental_health_broad" in df.columns
-        has_mh         = "is_mental_health" in df.columns
-        needs_screen   = (not has_broad) or df["is_mental_health_broad"].isna().any()
+        has_broad      = broad_col in df.columns
+        has_mh         = mh_col in df.columns
+        needs_screen   = (not has_broad) or df[broad_col].isna().any()
         needs_classify = (
             has_broad and has_mh and
-            ((df["is_mental_health_broad"] == "TRUE") & df["is_mental_health"].isna()).any()
+            ((df[broad_col] == "TRUE") & df[mh_col].isna()).any()
         )
         if needs_screen or needs_classify:
             pending.append(path)
@@ -119,13 +123,15 @@ for i in "${!CHUNK_ARRAY[@]}"; do
     echo ""
     echo "=== [$NUM/$N_TOTAL] $BASE: screen ($(date)) ==="
     python 02_classify.py "$CHUNK" \
-        --stage screen --backend vllm --model "$MODEL" --concurrency 16
+        --stage screen --backend vllm --model "$MODEL" \
+        --model-label "$MODEL_LABEL" --concurrency 16
 
     echo ""
     echo "=== [$NUM/$N_TOTAL] $BASE: classify ($(date)) ==="
     python 02_classify.py "$CHUNK" \
-        --stage classify --filter is_mental_health_broad=TRUE \
-        --backend vllm --model "$MODEL" --concurrency 8 -v
+        --stage classify --filter "is_mental_health_broad_${MODEL_LABEL}=TRUE" \
+        --backend vllm --model "$MODEL" \
+        --model-label "$MODEL_LABEL" --concurrency 8 -v
 
    echo "$(date '+%Y-%m-%d %H:%M:%S') [$NUM/$N_TOTAL] $BASE done" | tee -a logs/batch_progress.log    
 done

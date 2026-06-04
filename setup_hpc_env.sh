@@ -6,7 +6,7 @@
 #      downloaded here, where internet access is available.
 #   2. Avoids wasting GPU-billed time on installs and downloads.
 #   3. The conda env and cached weights are stored on shared filesystems
-#      ($HOME and $EPHEMERAL) so every subsequent job can use them directly.
+#      ($HOME) so every subsequent job can use them directly.
 #
 # Usage:
 #   ssh your_username@login.cx3.hpc.ic.ac.uk
@@ -16,7 +16,7 @@
 
 set -e
 
-MODEL="google/gemma-4-26B-A4B-it"   # Must match the MODEL variable in run_*.pbs
+MODEL="Qwen/Qwen3.6-35B-A3B"   # Must match the MODEL variable in config.sh
 
 # ---------------------------------------------------------------------------
 # 1. Conda environment
@@ -38,15 +38,14 @@ echo "Installed:"
 pip show vllm openai pandas | grep -E "^(Name|Version)"
 
 # ---------------------------------------------------------------------------
-# 2. Download model weights to $EPHEMERAL
+# 2. Download model weights to $HOME/huggingface
 #    Uses huggingface_hub (installed with vllm) — no GPU required.
 # ---------------------------------------------------------------------------
-export HF_HOME=$EPHEMERAL/huggingface
+export HF_HOME=$HOME/huggingface
 mkdir -p $HF_HOME
 
 echo ""
-echo "Downloading model weights for $MODEL to \$EPHEMERAL/huggingface..."
-echo "(~8GB for a 4B model — takes a few minutes)"
+echo "Downloading model weights for $MODEL to \$HOME/huggingface..."
 
 python -c "
 from huggingface_hub import snapshot_download

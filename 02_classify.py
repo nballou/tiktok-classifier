@@ -342,6 +342,7 @@ def load_pending(
     path: Path,
     output_col: str,
     row_filter: str | None,
+    prob_col: str = "prob_true",
 ) -> tuple[pd.DataFrame, list]:
     """Read a parquet file and return (df, pending_indices).
 
@@ -350,7 +351,7 @@ def load_pending(
     """
     df = pd.read_parquet(path)
 
-    for col in (output_col, "prob_true"):
+    for col in (output_col, prob_col):
         if col not in df.columns:
             df[col] = pd.NA
 
@@ -527,7 +528,8 @@ async def classify(args: argparse.Namespace) -> None:
     cols = args.cols
     with_rationale = args.rationale
 
-    df, pending = load_pending(path, output_col, args.filter)
+    prob_col = args.prob_col
+    df, pending = load_pending(path, output_col, args.filter, prob_col)
     if not pending:
         return
 
@@ -581,7 +583,7 @@ async def classify(args: argparse.Namespace) -> None:
 
             for (idx, text, _), (label, p, rationale) in zip(tasks, results):
                 df.at[idx, output_col] = label
-                df.at[idx, "prob_true"] = p
+                df.at[idx, prob_col] = p
                 if with_rationale:
                     df.at[idx, rationale_col] = rationale
                 if verbose:
@@ -794,6 +796,10 @@ def main():
     p.add_argument("--output-col", default=None,
                    help="Column to write results to (default: is_mental_health_broad for screen, "
                         "is_mental_health for classify)")
+    p.add_argument("--model-label", default=None,
+                   help="Short identifier appended to output column names "
+                        "(e.g. 'qwen3_8b' → is_mental_health_qwen3_8b, prob_true_qwen3_8b). "
+                        "Allows multiple model runs to coexist in one parquet.")
     p.add_argument("--filter", default=None, metavar="COL=VAL",
                    help="Only classify rows where COL equals VAL")
     p.add_argument("--concurrency", type=int, default=4)
@@ -813,6 +819,9 @@ def main():
         args.endpoint = defaults["endpoint"]
     if args.output_col is None:
         args.output_col = STAGE_OUTPUT_COLS[args.stage]
+    if args.model_label:
+        args.output_col = f"{args.output_col}_{args.model_label}"
+    args.prob_col = f"prob_true_{args.model_label}" if args.model_label else "prob_true"
 
     if args.evaluate:
         asyncio.run(evaluate(args))
