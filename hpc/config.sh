@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# config.sh — shared settings and helper functions for all PBS scripts.
-# Source after cd'ing to PBS_O_WORKDIR:
-#   cd "$PBS_O_WORKDIR"
-#   . ./config.sh
+# config.sh — HPC infrastructure: vLLM port and server helpers.
+# Model configuration lives in model.env (repo root).
+#
+# Source order in PBS scripts:
+#   . model.env      # MODEL, MODEL_LABEL, QUANTIZATION, LANGUAGE_MODEL_ONLY, DISABLE_THINKING
+#   . hpc/config.sh  # VLLM_PORT, vllm_start(), vllm_wait()
 
-MODEL="Qwen/Qwen3.6-35B-A3B"
-MODEL_LABEL="qwen36_35b"   # appended to output columns: is_mental_health_qwen36_35b
 VLLM_PORT=8000
 
 # Start vLLM in the background.
@@ -13,14 +13,20 @@ VLLM_PORT=8000
 #         VLLM_PID=$!          # capture immediately after
 vllm_start() {
     local log="${1:-logs/vllm.log}" err="${2:-logs/vllm.err}"
+    local extra_args=()
+
+    [ -n "$QUANTIZATION" ]                     && extra_args+=(--quantization "$QUANTIZATION")
+    [ "${LANGUAGE_MODEL_ONLY:-false}" = true ]  && extra_args+=(--language-model-only)
+    [ "${DISABLE_THINKING:-false}"    = true ]  && extra_args+=(--default-chat-template-kwargs '{"enable_thinking": false}')
+
     vllm serve "$MODEL" \
         --port "$VLLM_PORT" \
         --max-model-len 4096 \
         --max-num-batched-tokens 4096 \
-        --quantization fp8 \
         --gpu-memory-utilization 0.90 \
-        --limit-mm-per-prompt '{"image": 0, "audio": 0}' \
-        --override-generation-config '{"enable_thinking": false}' \
+        --compilation-config '{"cudagraph_capture_sizes": [1, 2, 4, 8]}' \
+        --max-num-seqs 64 \
+        "${extra_args[@]}" \
         > "$log" 2> "$err" &
 }
 

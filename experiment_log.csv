@@ -1,5 +1,4 @@
-timestamp,model,backend,accuracy,total,tp,tn,fp,fn,precision,recall,rows_per_sec,elapsed_sec,n_examples,prompt_hash,concurrency
-2026-04-07T10:51:01,gemma4:e4b,ollama,0.775,89,26,43,17,3,0.605,0.897,0.31,289.4,100,a404c1b4,4
+timestamp,stage,model,backend,accuracy,total,tp,tn,fp,fn,precision,recall,rows_per_sec,elapsed_sec,n_examples,prompt_hash,concurrency
 2026-05-20T14:14:59,screen,qwen3:4b-instruct,ollama,0.545,88,48,0,40,0,0.545,1.000,0.89,99.3,0,0c3d7fd0,2
 2026-05-20T14:18:55,screen,gemma4:e4b,ollama,0.727,88,34,30,10,14,0.773,0.708,0.82,107.8,0,b52412d6,2
 2026-05-20T14:31:05,screen,gemma4:e4b,ollama,0.787,89,42,28,9,10,0.824,0.808,0.81,110.2,0,2468127b,2

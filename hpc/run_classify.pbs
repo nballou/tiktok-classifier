@@ -1,18 +1,20 @@
 #!/bin/bash
-# Full classification job — run run_test.pbs first to verify the pipeline.
+# Production classify job — screen + classify on the full metadata parquet.
+# Atomic resume: if the job hits the 24h walltime, just resubmit —
+# classify.py skips rows that already have a non-null result column.
 #
 # Submit:
-#   qsub run_classify.pbs
-#   qstat -u $USER
+#   qsub hpc/run_classify.pbs
+#   qsub -v INPUT=metadata/other.parquet hpc/run_classify.pbs   # different input
 
 #PBS -N tiktok_classify
-#PBS -l walltime=02:00:00
+#PBS -l walltime=24:00:00
 #PBS -l select=1:ncpus=8:mem=48gb:ngpus=1
 #PBS -q v1_gpu72
 #PBS -o logs/
 #PBS -e logs/
 
-INPUT="metadata/sample_1000.parquet"
+INPUT="${INPUT:-metadata/data.parquet}"
 
 module load miniforge/3
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
@@ -22,7 +24,8 @@ export HF_HOME=$HOME/huggingface
 cd $PBS_O_WORKDIR
 mkdir -p logs
 
-. ./config.sh   # MODEL, VLLM_PORT, vllm_start(), vllm_wait()
+. model.env       # MODEL, MODEL_LABEL, QUANTIZATION, LANGUAGE_MODEL_ONLY, DISABLE_THINKING
+. hpc/config.sh   # VLLM_PORT, vllm_start(), vllm_wait()
 
 echo "=== Job started: $(date) ==="
 echo "Node:  $(hostname)"
@@ -43,15 +46,16 @@ fi
 
 echo ""
 echo "=== Pass 1: screen ($(date)) ==="
-python 02_classify.py "$INPUT" \
+python classify.py "$INPUT" \
     --stage screen --backend vllm --model "$MODEL" \
     --model-label "$MODEL_LABEL" --concurrency 16 -v
 
 echo ""
 echo "=== Pass 2: classify ($(date)) ==="
-python 02_classify.py "$INPUT" \
+python classify.py "$INPUT" \
     --stage classify \
     --filter "is_mental_health_broad_${MODEL_LABEL}=TRUE" \
+    --rationale \
     --backend vllm --model "$MODEL" \
     --model-label "$MODEL_LABEL" --concurrency 8 -v
 

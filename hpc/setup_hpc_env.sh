@@ -12,11 +12,12 @@
 #   ssh your_username@login.cx3.hpc.ic.ac.uk
 #   git clone https://github.com/nballou/tiktok-classifier.git
 #   cd tiktok-classifier
-#   bash setup_hpc_env.sh
+#   bash hpc/setup_hpc_env.sh
 
 set -e
 
-MODEL="Qwen/Qwen3.6-35B-A3B"   # Must match the MODEL variable in config.sh
+# Read MODEL (and other settings) from the shared config
+. "$(dirname "$0")/../model.env"
 
 # ---------------------------------------------------------------------------
 # 1. Conda environment
@@ -32,7 +33,7 @@ else
 fi
 
 conda activate tiktok
-pip install --quiet vllm pandas pyarrow "openai>=1.0" httpx
+pip install -e ".[hpc]"
 
 echo "Installed:"
 pip show vllm openai pandas | grep -E "^(Name|Version)"
@@ -56,4 +57,4 @@ print('Download complete.')
 echo ""
 echo "Setup complete. Run the test job next:"
 echo "  mkdir -p ~/tiktok-classifier/logs"
-echo "  qsub run_test.pbs"
+echo "  qsub hpc/run_smoke_test.pbs"

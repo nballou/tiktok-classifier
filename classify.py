@@ -1,5 +1,5 @@
 """
-02_classify.py — Two-pass LLM classifier for TikTok video metadata.
+classify.py — Two-pass LLM classifier for TikTok video metadata.
 
 Pass 1 (--stage screen): broad liberal screen — labels TRUE anything that
     might relate to mental health. Writes to is_mental_health_broad.
@@ -10,16 +10,19 @@ Pass 2 (--stage classify): fine-grained classification applied to rows that
 Supports Ollama (local Mac) and vLLM (HPC) backends. Atomic checkpointing
 and full resume support.
 
+Model defaults (--model, --model-label) are read from model.env in the repo
+root if present; CLI flags override them.
+
 Requirements:
     pip install pandas pyarrow openai httpx
 
 Local (Mac, Ollama):
     ollama serve
-    python 02_classify.py data.parquet --stage screen -v
-    python 02_classify.py data.parquet --stage classify --filter is_mental_health_broad=TRUE -v
+    python classify.py data.parquet --stage screen -v
+    python classify.py data.parquet --stage classify --filter is_mental_health_broad=TRUE -v
 
 Evaluation (with rationale):
-    python 02_classify.py data.parquet --stage classify --evaluate ground_truth.csv --rationale
+    python classify.py data.parquet --stage classify --evaluate ground_truth.csv --rationale
 
 Design:
     - Rows with a non-null output column are skipped on resume.
@@ -42,6 +45,22 @@ from pathlib import Path
 
 import pandas as pd
 from openai import AsyncOpenAI
+
+
+def _load_model_env() -> dict:
+    """Parse model.env (repo root) into a dict. Missing file is silently ignored."""
+    path = Path(__file__).parent / "model.env"
+    env = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            key, _, val = line.partition("=")
+            env[key.strip()] = val.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return env
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -491,11 +510,14 @@ async def classify_one_vllm(
         max_tokens=max_tok,
     )
 
+    no_think = {"chat_template_kwargs": {"enable_thinking": False}}
     if not with_rationale:
         if not use_legacy[0]:
-            body["extra_body"] = {"structured_outputs": {"choice": labels}}
+            body["extra_body"] = {"structured_outputs": {"choice": labels}, **no_think}
         else:
-            body["extra_body"] = {"guided_choice": labels}
+            body["extra_body"] = {"guided_choice": labels, **no_think}
+    else:
+        body["extra_body"] = no_think
 
     async with sem:
         try:
@@ -503,7 +525,7 @@ async def classify_one_vllm(
         except Exception as exc:
             if not use_legacy[0] and not with_rationale and "structured_outputs" in str(exc):
                 use_legacy[0] = True
-                body["extra_body"] = {"guided_choice": labels}
+                body["extra_body"] = {"guided_choice": labels, **no_think}
                 resp = await client.chat.completions.create(**body)
             else:
                 raise
@@ -769,10 +791,13 @@ async def evaluate(args: argparse.Namespace) -> None:
 
 
 def main():
+    _env = _load_model_env()
+
     p = argparse.ArgumentParser(
         description="Two-pass LLM classifier for TikTok mental-health content.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    p.set_defaults(model=_env.get("MODEL"), model_label=_env.get("MODEL_LABEL"))
     p.add_argument("file", help="Parquet file to classify")
 
     p.add_argument("--stage", choices=["screen", "classify"], required=True,
@@ -822,6 +847,9 @@ def main():
     if args.model_label:
         args.output_col = f"{args.output_col}_{args.model_label}"
     args.prob_col = f"prob_true_{args.model_label}" if args.model_label else "prob_true"
+    if args.filter is None and args.stage == "classify":
+        broad_col = f"is_mental_health_broad_{args.model_label}" if args.model_label else "is_mental_health_broad"
+        args.filter = f"{broad_col}=TRUE"
 
     if args.evaluate:
         asyncio.run(evaluate(args))
