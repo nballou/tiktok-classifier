@@ -43,7 +43,10 @@ TESTFILE="metadata/test_${ROWS}.parquet"
 python - "$ROWS" "$MODEL_LABEL" "$MASTER" "$TESTFILE" <<PYEOF
 import pandas as pd, sys
 rows, label, src, dst = int(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-df = pd.read_parquet(src).head(rows)
+df = pd.read_parquet(src)
+if 'scrape_status' in df.columns:
+    df = df[df['scrape_status'] != 'error']
+df = df.head(rows)
 cols_to_drop = [c for c in df.columns if label in c]
 if cols_to_drop:
     df = df.drop(columns=cols_to_drop)
@@ -66,17 +69,13 @@ fi
 echo ""
 echo "=== Screen pass ==="
 python classify.py "$TESTFILE" \
-    --stage screen --backend vllm --model "$MODEL" \
-    --model-label "$MODEL_LABEL" --concurrency 4 -v
+    --stage screen --backend vllm --concurrency 4 -v
 
 echo ""
 echo "=== Classify pass ==="
 python classify.py "$TESTFILE" \
-    --stage classify \
-    --filter "is_mental_health_broad_${MODEL_LABEL}=TRUE" \
-    --rationale \
-    --backend vllm --model "$MODEL" \
-    --model-label "$MODEL_LABEL" --concurrency 2 -v
+    --stage classify --rationale \
+    --backend vllm --concurrency 2 -v
 
 echo ""
 python - "$MODEL_LABEL" "$TESTFILE" <<PYEOF

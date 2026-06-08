@@ -47,17 +47,13 @@ fi
 echo ""
 echo "=== Pass 1: screen ($(date)) ==="
 python classify.py "$INPUT" \
-    --stage screen --backend vllm --model "$MODEL" \
-    --model-label "$MODEL_LABEL" --concurrency 16 -v
+    --stage screen --backend vllm --concurrency 16 -v
 
 echo ""
 echo "=== Pass 2: classify ($(date)) ==="
 python classify.py "$INPUT" \
-    --stage classify \
-    --filter "is_mental_health_broad_${MODEL_LABEL}=TRUE" \
-    --rationale \
-    --backend vllm --model "$MODEL" \
-    --model-label "$MODEL_LABEL" --concurrency 8 -v
+    --stage classify --rationale \
+    --backend vllm --concurrency 8 -v
 
 kill $VLLM_PID 2>/dev/null
 echo ""

@@ -31,10 +31,10 @@ vllm_start() {
 }
 
 # Block until vLLM health endpoint responds or timeout expires.
-# Usage:  vllm_wait [timeout_seconds]   (default: 1200)
+# Usage:  vllm_wait [timeout_seconds]   (default: 1800)
 # Returns 1 on timeout.
 vllm_wait() {
-    local secs=0 limit="${1:-1200}"
+    local secs=0 limit="${1:-1800}"
     echo "Waiting for vLLM on port $VLLM_PORT..."
     until curl -sf "http://localhost:$VLLM_PORT/health" > /dev/null 2>&1; do
         sleep 10; secs=$((secs + 10))
