@@ -19,7 +19,7 @@
 #PBS -o logs/
 #PBS -e logs/
 
-MODEL="google/gemma-3-4b-it"
+MODEL="google/gemma-4-26B-A4B-it"
 
 module load miniforge/3
 eval "$(~/miniforge3/bin/conda shell.bash hook)"
@@ -48,6 +48,7 @@ else:
 # Start vLLM
 vllm serve "$MODEL" \
     --port 8000 \
+    --quantization fp8 \
     --max-model-len 4096 \
     --gpu-memory-utilization 0.90 \
     --disable-log-requests \

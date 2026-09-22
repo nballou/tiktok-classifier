@@ -7,12 +7,12 @@
 
 #PBS -N tiktok_classify
 #PBS -l walltime=02:00:00
-#PBS -l select=1:ncpus=8:mem=48gb:ngpus=1:gpu_type=L40S
+#PBS -l select=1:ncpus=8:mem=24gb:ngpus=1:gpu_type=L40S
 #PBS -q gpu72
 #PBS -o logs/
 #PBS -e logs/
 
-MODEL="google/gemma-3-4b-it"
+MODEL="google/gemma-4-26B-A4B-it"
 INPUT="sample_1000.parquet"
 
 module load miniforge/3
@@ -31,6 +31,7 @@ echo ""
 
 vllm serve "$MODEL" \
     --port 8000 \
+    --quantization fp8 \
     --max-model-len 4096 \
     --gpu-memory-utilization 0.90 \
     --disable-log-requests \
