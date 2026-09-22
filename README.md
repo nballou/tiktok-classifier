@@ -3,6 +3,13 @@
 Two-pass LLM pipeline that classifies TikTok videos as mental-health-related
 based on text metadata (description, transcript, suggested words).
 
+This is the third stage of the TikTok data pipeline:
+`tiktok-donations-backend` → `tiktok-scraper` → `tiktok-training-data` → **`tiktok-classifier`**.
+Input metadata comes from `../pipeline-data/02-metadata/tiktok_metadata.parquet`
+(written by `tiktok-scraper`); ground-truth labels come from
+`../pipeline-data/03-handcoded/handcoded_examples.csv` (maintained live by
+`tiktok-training-data`'s labelling app). Neither file is stored in this repo.
+
 - **Pass 1 — screen** (`--stage screen`): liberal first pass over all videos.
   Casts a wide net; false positives are acceptable. Writes to
   `is_mental_health_broad`.
@@ -48,14 +55,14 @@ prompted for a two-line response (label on line 1, explanation on line 2).
 
 ```bash
 # Pass 1: screen all videos (~8% expected to pass)
-python 02_classify.py tiktok_metadata.parquet \
+python 02_classify.py ../pipeline-data/02-metadata/tiktok_metadata.parquet \
   --stage screen \
   --model gemma4:e4b \
   --concurrency 4 \
   -v
 
 # Pass 2: classify screen-positives only
-python 02_classify.py tiktok_metadata.parquet \
+python 02_classify.py ../pipeline-data/02-metadata/tiktok_metadata.parquet \
   --stage classify \
   --filter is_mental_health_broad=TRUE \
   --model gemma4:e4b \
@@ -80,9 +87,9 @@ with these columns beyond the standard metadata:
 
 ```bash
 # Evaluate classify stage (filter to screen-passing rows)
-python 02_classify.py tiktok_metadata.parquet \
+python 02_classify.py ../pipeline-data/02-metadata/tiktok_metadata.parquet \
   --stage classify \
-  --evaluate handcoded_examples.csv \
+  --evaluate ../pipeline-data/03-handcoded/handcoded_examples.csv \
   --filter is_superficial_mental_health_handcoded=TRUE \
   --rationale \
   --model gemma4:e4b \
@@ -150,7 +157,7 @@ For 1M rows, partition first and run a screen pass per chunk:
 
 ```bash
 # 1. Partition into chunks
-python 01_partition.py tiktok_metadata.parquet --partition 100
+python 01_partition.py ../pipeline-data/02-metadata/tiktok_metadata.parquet --partition 100
 
 # 2. One PBS job per chunk — set #PBS -J 1-100 in the job script, then:
 python 02_classify.py chunks/chunk_$(printf "%03d" $((PBS_ARRAY_INDEX-1))).parquet \
